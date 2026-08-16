@@ -1,0 +1,26 @@
+# --- Base geoespacial (usado nos dois projetos) ---
+geopandas>=0.14
+shapely>=2.0
+fiona>=1.9
+pyproj>=3.6
+pandas>=2.0
+numpy>=1.26
+scipy>=1.11
+
+# --- App da Treemap (gerador de covas em Streamlit) ---
+streamlit>=1.30
+openpyxl>=3.1          # exportar/ler .xlsx, se precisar
+
+# --- Análise anual de talhões (busca STAC + notebook) ---
+pystac-client>=0.9
+planetary-computer>=1.0
+stackstac>=0.5
+rioxarray>=0.15
+xarray>=2024.1
+dask>=2024.1
+
+# --- Notebook interativo ---
+jupyter>=1.0
+notebook>=7.0
+ipywidgets>=8.1
+matplotlib>=3.8
