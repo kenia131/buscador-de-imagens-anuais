@@ -125,6 +125,119 @@ def processar_talhao(
     return composicoes, erros
 
 
+def processar_talhao_incremental(
+    talhao_id,
+    geometria,
+    ano_inicio,
+    ano_fim,
+    ano_transicao_sentinel,
+    buffer_m,
+    max_workers=6,
+    usar_cache=True,
+):
+    """
+    Gerador que produz (ano, fonte, composicao, erro) assim que cada ano
+    fica pronto — anos já em cache são entregues imediatamente (na ordem
+    cronológica); anos que precisam ser buscados são processados em
+    paralelo e entregues na ordem em que TERMINAM de baixar (via
+    `as_completed`, não `map`), permitindo mostrar cada imagem assim que
+    estiver pronta, sem esperar o lote inteiro terminar.
+    """
+    geometria_buffer = buffer_metros(geometria, buffer_m)
+    anos_para_buscar = []
+
+    for ano in range(ano_inicio, ano_fim + 1):
+        fonte, _ = fonte_e_resolucao_do_ano(ano, ano_transicao_sentinel)
+        arquivo_cache = caminho_cache(talhao_id, ano, fonte)
+        if usar_cache and arquivo_cache.exists():
+            with open(arquivo_cache, "rb") as f:
+                composicao = pickle.load(f)
+            yield ano, fonte, composicao, None
+        else:
+            anos_para_buscar.append(ano)
+
+    if not anos_para_buscar:
+        return
+
+    def _buscar_um_ano(ano):
+        fonte, resolucao = fonte_e_resolucao_do_ano(ano, ano_transicao_sentinel)
+        try:
+            composicao = composicao_anual(
+                geometria, ano,
+                geometria_buffer_wgs84=geometria_buffer,
+                fonte=fonte, resolucao=resolucao,
+            )
+            erro = None
+        except Exception as e:
+            composicao = None
+            erro = f"{ano} ({fonte}): {e}"
+        return ano, fonte, composicao, erro
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_buscar_um_ano, ano): ano for ano in anos_para_buscar}
+        for future in concurrent.futures.as_completed(futures):
+            ano, fonte, composicao, erro = future.result()
+            if usar_cache:
+                with open(caminho_cache(talhao_id, ano, fonte), "wb") as f:
+                    pickle.dump(composicao, f)
+            yield ano, fonte, composicao, erro
+
+
+def plotar_imagem_individual(
+    composicao,
+    geometria,
+    bandas=("nir", "swir1", "red"),
+    minimo=0.0,
+    maximo=0.5,
+    destaque_candidato=False,
+    cache_crs=None,
+):
+    """
+    Plota UMA única imagem (não a grade inteira) — usada no modo
+    incremental, onde cada ano vira uma figura pequena e independente,
+    exibida assim que fica pronta. `cache_crs` (um dict compartilhado
+    entre chamadas) evita reprojetar o talhão do zero a cada imagem.
+    """
+    fig, ax = plt.subplots(figsize=(4, 4))
+    rgb = aplicar_janela_fixa(composicao, bandas=bandas, minimo=minimo, maximo=maximo)
+
+    dx = abs(float(composicao.x[1] - composicao.x[0]))
+    dy = abs(float(composicao.y[0] - composicao.y[1]))
+    extent = [
+        float(composicao.x.min()) - dx / 2, float(composicao.x.max()) + dx / 2,
+        float(composicao.y.min()) - dy / 2, float(composicao.y.max()) + dy / 2,
+    ]
+    ax.imshow(rgb, extent=extent, origin="upper")
+
+    crs_imagem = str(composicao.rio.crs)
+    if cache_crs is not None and crs_imagem in cache_crs:
+        gdf_talhao = cache_crs[crs_imagem]
+    else:
+        gdf_talhao = gpd.GeoSeries([geometria], crs="EPSG:4326").to_crs(composicao.rio.crs)
+        if cache_crs is not None:
+            cache_crs[crs_imagem] = gdf_talhao
+    gdf_talhao.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.5)
+
+    fonte = composicao.attrs.get("fonte", "?")
+    nuvem_pct = composicao.attrs.get("nuvem_pct")
+    tier = composicao.attrs.get("tier")
+    ano = composicao.attrs.get("ano")
+    info_nuvem = f", {nuvem_pct:.0f}% nuvem" if nuvem_pct is not None else ""
+    aviso_tier = " ⚠️T2" if tier == "T2" else ""
+    aviso_candidato = " 🔴" if destaque_candidato else ""
+    ax.set_title(f"{ano} ({fonte}{info_nuvem}){aviso_tier}{aviso_candidato}", fontsize=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    if destaque_candidato:
+        for borda in ax.spines.values():
+            borda.set_edgecolor("red")
+            borda.set_linewidth(3)
+
+    plt.tight_layout()
+    return fig
+
+
 def plotar_grade_anual(
     talhao_id,
     geometria,
@@ -132,7 +245,7 @@ def plotar_grade_anual(
     bandas=("nir", "swir1", "red"),
     minimo=0.0,
     maximo=0.5,
-    ncols=3,
+    ncols=6,
     anos_candidatos=None,
 ):
     """
@@ -181,24 +294,24 @@ def plotar_grade_anual(
         fonte = composicao.attrs.get("fonte", "?")
         nuvem_pct = composicao.attrs.get("nuvem_pct")
         tier = composicao.attrs.get("tier")
-        #info_nuvem = f", {nuvem_pct:.0f}% nuvem" if nuvem_pct is not None else ""
+        info_nuvem = f", {nuvem_pct:.0f}% nuvem" if nuvem_pct is not None else ""
         aviso_tier = " ⚠️ T2" if tier == "T2" else ""
         eh_candidato = ano in anos_candidatos
         aviso_candidato = " 🔴 candidato a colheita" if eh_candidato else ""
-        ax.set_title(f"{ano} ({fonte}){aviso_tier}{aviso_candidato}", fontsize=12)
+        ax.set_title(f"{ano} ({fonte}{info_nuvem}){aviso_tier}{aviso_candidato}", fontsize=9)
         ax.set_xticks([])
         ax.set_yticks([])
 
         if eh_candidato:
             for borda in ax.spines.values():
-                borda.set_edgecolor("blue")
+                borda.set_edgecolor("red")
                 borda.set_linewidth(4)
 
     for j in range(n, nrows * ncols):
         linha, coluna = divmod(j, ncols)
         eixos[linha][coluna].axis("off")
 
-    #fig.suptitle(f"Talhão {talhao_id} — falsa cor NIR/SWIR1/RED (janela {minimo}-{maximo})", fontsize=14)
+    fig.suptitle(f"Talhão {talhao_id} — falsa cor NIR/SWIR1/RED (janela {minimo}-{maximo})", fontsize=14)
     plt.tight_layout()
     return fig
 
@@ -214,6 +327,7 @@ if "composicoes" not in st.session_state:
     st.session_state.figura_cache_params = None  # (talhao_id, ncols, minimo, maximo) do último render
     st.session_state.figura_cache_fig = None
     st.session_state.figura_cache_png = None
+    st.session_state.modo_usado = None  # "incremental" ou "classico" — controla a Seção 4
 
 
 # --- SEÇÃO 1: GEOMETRIA ---
@@ -291,7 +405,7 @@ col4, col5, col6 = st.columns(3)
 with col4:
     buffer_valor = st.number_input("Buffer de contexto (m)", min_value=0, value=60)
 with col5:
-    ncols = st.number_input("Colunas na grade", min_value=1, max_value=6, value=3)
+    ncols = st.number_input("Colunas na grade", min_value=1, max_value=10, value=6)
 with col6:
     max_workers = st.number_input("Downloads em paralelo", min_value=1, max_value=12, value=6)
 
@@ -314,75 +428,188 @@ with col10:
 with col11:
     top_n_candidatos = st.number_input("Máximo de candidatos", min_value=1, max_value=10, value=3)
 
+st.subheader("Modo de exibição")
+modo_exibicao = st.radio(
+    "Como mostrar as imagens?",
+    ["Incremental (uma por vez, assim que fica pronta)", "Grade única (clássica, espera tudo terminar)"],
+    horizontal=True,
+    help="O modo incremental mostra cada ano assim que ele termina de baixar, sem esperar "
+         "o lote inteiro — recomendado para buscas com muitos anos.",
+)
+modo_incremental = modo_exibicao.startswith("Incremental")
+
 
 # --- SEÇÃO 3: PROCESSAR ---
 
 st.header("3. Buscar imagens")
 
 if st.button("🚀 Buscar/atualizar imagens", type="primary", use_container_width=True, disabled=(geometria is None)):
-    barra = st.progress(0.0, text="Iniciando...")
-
-    def _atualizar_barra(concluidos, total):
-        barra.progress(concluidos / total, text=f"{concluidos}/{total} anos processados")
-
-    with st.spinner("Buscando imagens no Planetary Computer..."):
-        composicoes, erros = processar_talhao(
-            talhao_id,
-            geometria,
-            ano_inicio=int(ano_inicio),
-            ano_fim=int(ano_fim),
-            ano_transicao_sentinel=int(ano_transicao_sentinel),
-            buffer_m=buffer_valor,
-            max_workers=int(max_workers),
-            callback_progresso=_atualizar_barra,
-        )
-
-    barra.empty()
-
-    st.session_state.composicoes = composicoes
     st.session_state.talhao_id = talhao_id
     st.session_state.geometria_processada = geometria
     st.session_state.figura_cache_params = None  # invalida o cache de renderização (novos dados)
 
-    anos_ok = sorted([a for a, c in composicoes.items() if c is not None])
-    anos_falha = sorted([a for a, c in composicoes.items() if c is None])
+    if modo_incremental:
+        st.session_state.modo_usado = "incremental"
 
-    st.success(f"{len(anos_ok)} de {int(ano_fim) - int(ano_inicio) + 1} ano(s) com imagem encontrada.")
-    if anos_falha:
-        st.warning(f"Sem imagem para: {anos_falha}")
-    if erros:
-        with st.expander(f"{len(erros)} erro(s) durante o processamento"):
-            for msg in erros:
-                st.text(msg)
+        anos_totais = list(range(int(ano_inicio), int(ano_fim) + 1))
+        n_total = len(anos_totais)
+        ncols_int = int(ncols)
 
-    # --- Detecção automática de colheita via queda de NDVI ---
-    if detectar_candidatos:
-        serie_ndvi = serie_temporal_ndvi_medio(composicoes)
-        candidatos = sugerir_anos_candidatos(
-            serie_ndvi, queda_minima=queda_minima_ndvi, top_n=int(top_n_candidatos)
-        )
-        st.session_state.anos_candidatos = [c["ano"] for c in candidatos]
-        st.session_state.detalhes_candidatos = candidatos
+        st.subheader("Progresso")
+        barra = st.progress(0.0, text="Iniciando...")
 
-        if candidatos:
-            st.info(
-                "🔴 Candidatos automáticos a ano de colheita (maior queda de NDVI primeiro): "
-                + "; ".join(
-                    f"**{c['ano']}** (NDVI caiu de {c['ndvi_antes']} para {c['ndvi_depois']}, "
-                    f"queda de {c['queda_ndvi']})"
-                    for c in candidatos
+        st.subheader("Imagens (aparecem conforme ficam prontas)")
+        placeholders = {}
+        for i, ano in enumerate(anos_totais):
+            coluna_idx = i % ncols_int
+            if coluna_idx == 0:
+                cols_atuais = st.columns(ncols_int)
+            placeholders[ano] = cols_atuais[coluna_idx].empty()
+            placeholders[ano].caption(f"{ano} — na fila...")
+
+        composicoes = {}
+        erros = []
+        concluidos = 0
+        cache_crs = {}  # evita reprojetar o talhão do zero a cada imagem
+
+        for ano, fonte, composicao, erro in processar_talhao_incremental(
+            talhao_id, geometria,
+            ano_inicio=int(ano_inicio), ano_fim=int(ano_fim),
+            ano_transicao_sentinel=int(ano_transicao_sentinel),
+            buffer_m=buffer_valor, max_workers=int(max_workers),
+        ):
+            composicoes[ano] = composicao
+            if erro:
+                erros.append(erro)
+
+            if composicao is not None:
+                fig = plotar_imagem_individual(
+                    composicao, geometria,
+                    minimo=minimo_contraste, maximo=maximo_contraste,
+                    cache_crs=cache_crs,
                 )
+                placeholders[ano].pyplot(fig)
+                plt.close(fig)  # libera memória — importante para lotes grandes (200+ imagens)
+            else:
+                placeholders[ano].warning(f"{ano}: sem imagem")
+
+            concluidos += 1
+            barra.progress(concluidos / n_total, text=f"{concluidos}/{n_total} anos processados")
+
+        barra.empty()
+        st.session_state.composicoes = composicoes
+
+        anos_ok = sorted([a for a, c in composicoes.items() if c is not None])
+        anos_falha = sorted([a for a, c in composicoes.items() if c is None])
+        st.success(f"{len(anos_ok)} de {n_total} ano(s) com imagem encontrada.")
+        if anos_falha:
+            st.warning(f"Sem imagem para: {anos_falha}")
+        if erros:
+            with st.expander(f"{len(erros)} erro(s) durante o processamento"):
+                for msg in erros:
+                    st.text(msg)
+
+        # --- Detecção automática de colheita via queda de NDVI ---
+        # (só é possível depois que TODOS os anos terminaram, já que compara
+        # ano a ano; os placeholders já exibidos são atualizados no lugar
+        # com a borda vermelha, sem precisar redesenhar a grade inteira)
+        if detectar_candidatos:
+            serie_ndvi = serie_temporal_ndvi_medio(composicoes)
+            candidatos = sugerir_anos_candidatos(
+                serie_ndvi, queda_minima=queda_minima_ndvi, top_n=int(top_n_candidatos)
             )
+            st.session_state.anos_candidatos = [c["ano"] for c in candidatos]
+            st.session_state.detalhes_candidatos = candidatos
+
+            for c in candidatos:
+                composicao_candidata = composicoes.get(c["ano"])
+                if composicao_candidata is not None:
+                    fig = plotar_imagem_individual(
+                        composicao_candidata, geometria,
+                        minimo=minimo_contraste, maximo=maximo_contraste,
+                        destaque_candidato=True, cache_crs=cache_crs,
+                    )
+                    placeholders[c["ano"]].pyplot(fig)
+                    plt.close(fig)
+
+            if candidatos:
+                st.info(
+                    "🔴 Candidatos automáticos a ano de colheita (destacados em vermelho acima): "
+                    + "; ".join(
+                        f"**{c['ano']}** (NDVI caiu de {c['ndvi_antes']} para {c['ndvi_depois']}, "
+                        f"queda de {c['queda_ndvi']})"
+                        for c in candidatos
+                    )
+                )
+            else:
+                st.caption("Nenhuma queda de NDVI acima do limiar foi encontrada — revise a grade manualmente.")
         else:
-            st.caption("Nenhuma queda de NDVI acima do limiar foi encontrada — revise a grade manualmente.")
+            st.session_state.anos_candidatos = []
+            st.session_state.detalhes_candidatos = []
+
     else:
-        st.session_state.anos_candidatos = []
-        st.session_state.detalhes_candidatos = []
+        st.session_state.modo_usado = "classico"
+        barra = st.progress(0.0, text="Iniciando...")
+
+        def _atualizar_barra(concluidos, total):
+            barra.progress(concluidos / total, text=f"{concluidos}/{total} anos processados")
+
+        with st.spinner("Buscando imagens no Planetary Computer..."):
+            composicoes, erros = processar_talhao(
+                talhao_id,
+                geometria,
+                ano_inicio=int(ano_inicio),
+                ano_fim=int(ano_fim),
+                ano_transicao_sentinel=int(ano_transicao_sentinel),
+                buffer_m=buffer_valor,
+                max_workers=int(max_workers),
+                callback_progresso=_atualizar_barra,
+            )
+
+        barra.empty()
+
+        st.session_state.composicoes = composicoes
+
+        anos_ok = sorted([a for a, c in composicoes.items() if c is not None])
+        anos_falha = sorted([a for a, c in composicoes.items() if c is None])
+
+        st.success(f"{len(anos_ok)} de {int(ano_fim) - int(ano_inicio) + 1} ano(s) com imagem encontrada.")
+        if anos_falha:
+            st.warning(f"Sem imagem para: {anos_falha}")
+        if erros:
+            with st.expander(f"{len(erros)} erro(s) durante o processamento"):
+                for msg in erros:
+                    st.text(msg)
+
+        # --- Detecção automática de colheita via queda de NDVI ---
+        if detectar_candidatos:
+            serie_ndvi = serie_temporal_ndvi_medio(composicoes)
+            candidatos = sugerir_anos_candidatos(
+                serie_ndvi, queda_minima=queda_minima_ndvi, top_n=int(top_n_candidatos)
+            )
+            st.session_state.anos_candidatos = [c["ano"] for c in candidatos]
+            st.session_state.detalhes_candidatos = candidatos
+
+            if candidatos:
+                st.info(
+                    "🔴 Candidatos automáticos a ano de colheita (maior queda de NDVI primeiro): "
+                    + "; ".join(
+                        f"**{c['ano']}** (NDVI caiu de {c['ndvi_antes']} para {c['ndvi_depois']}, "
+                        f"queda de {c['queda_ndvi']})"
+                        for c in candidatos
+                    )
+                )
+            else:
+                st.caption("Nenhuma queda de NDVI acima do limiar foi encontrada — revise a grade manualmente.")
+        else:
+            st.session_state.anos_candidatos = []
+            st.session_state.detalhes_candidatos = []
 
 
-# --- SEÇÃO 4: RESULTADO (só re-renderiza se ncols/contraste realmente mudaram) ---
+# --- SEÇÃO 4: RESULTADO (só no modo clássico — no incremental, as imagens já
+# foram mostradas ao vivo durante o processamento na Seção 3) ---
 
-if st.session_state.composicoes is not None:
+if st.session_state.modo_usado == "classico" and st.session_state.composicoes is not None:
     st.header("4. Grade de imagens")
     if st.session_state.anos_candidatos:
         st.caption("🔴 Borda vermelha grossa = ano candidato a colheita (queda de NDVI)")
