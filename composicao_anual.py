@@ -95,7 +95,7 @@ def _colecao_stac(fonte):
     raise ValueError("fonte deve ser 'landsat' ou 'sentinel2'")
 
 
-def buscar_todas_as_cenas(geometria_wgs84, ano, fonte="landsat", mes_inicio=1, mes_fim=12):
+def buscar_todas_as_cenas(geometria_wgs84, ano, fonte="landsat", mes_inicio=5, mes_fim=7):
     """Busca TODAS as cenas (sem filtro de nuvem) da coleção escolhida que
     intersectam a geometria no intervalo de datas informado."""
     catalogo = _abrir_catalogo()

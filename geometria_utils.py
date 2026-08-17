@@ -13,6 +13,7 @@ nas buscas STAC (Planetary Computer / Brazil Data Cube).
 import hashlib
 import json
 import re
+import warnings
 from pathlib import Path
 
 import fiona
@@ -48,10 +49,57 @@ def _id_estavel_da_geometria(geometria):
     return "geom_" + hashlib.md5(geometria.wkb).hexdigest()[:12]
 
 
+def _validar_e_reparar_geometria(geometria, identificador=None):
+    """
+    Verifica se a geometria é válida (sem auto-interseções etc.) e, se
+    não for, tenta reparar automaticamente com `buffer(0)` — a técnica
+    padrão para esse tipo de problema.
+
+    Isso é importante porque uma geometria inválida pode causar erros
+    obscuros mais adiante (ex.: `GEOSException: getY called on empty
+    Point` ao calcular o centróide para o buffer de contexto), em vez de
+    um erro claro no momento do carregamento — dependendo da versão do
+    GEOS/Shapely instalada, calcular o centróide de um polígono
+    auto-intersectante pode retornar uma geometria vazia em vez de
+    lançar um erro.
+    """
+    if geometria is None or geometria.is_empty:
+        raise ValueError(
+            f"A geometria{f' do talhão {identificador}' if identificador else ''} "
+            "está vazia."
+        )
+
+    if geometria.is_valid:
+        return geometria
+
+    geometria_reparada = geometria.buffer(0)
+
+    if geometria_reparada.is_empty:
+        raise ValueError(
+            f"A geometria{f' do talhão {identificador}' if identificador else ''} "
+            "está inválida (auto-interseção) e não foi possível repará-la "
+            "automaticamente. Corrija o desenho em um software de GIS (ex.: "
+            "'Fix geometries' no QGIS) antes de enviá-la."
+        )
+
+    if geometria.area > 0:
+        diferenca_pct = abs(geometria.area - geometria_reparada.area) / geometria.area * 100
+        if diferenca_pct > 1:
+            warnings.warn(
+                f"A geometria{f' do talhão {identificador}' if identificador else ''} "
+                f"estava inválida (auto-interseção) e foi corrigida automaticamente, "
+                f"mas isso alterou a área em {diferenca_pct:.1f}%. Vale a pena revisar "
+                "o desenho original em um software de GIS para confirmar se está correto."
+            )
+
+    return geometria_reparada
+
+
 def _geometria_unica_a_partir_de_gdf(gdf, id_campo=None):
     """
     Recebe um GeoDataFrame (uma ou mais feições) e retorna uma lista de
-    tuplas (id_talhao, geometria_shapely) em WGS84.
+    tuplas (id_talhao, geometria_shapely) em WGS84, com a geometria já
+    validada/reparada (ver `_validar_e_reparar_geometria`).
 
     Se `id_campo` for informado e existir no GeoDataFrame, usa seus
     valores como identificador do talhão; caso contrário, usa um
@@ -69,11 +117,15 @@ def _geometria_unica_a_partir_de_gdf(gdf, id_campo=None):
 
     resultado = []
     for idx, row in gdf.iterrows():
+        identificador_temporario = row[id_campo] if (id_campo and id_campo in gdf.columns) else idx
+        geometria_valida = _validar_e_reparar_geometria(row.geometry, identificador=identificador_temporario)
+
         if id_campo and id_campo in gdf.columns:
             talhao_id = row[id_campo]
         else:
-            talhao_id = _id_estavel_da_geometria(row.geometry)
-        resultado.append((talhao_id, row.geometry))
+            talhao_id = _id_estavel_da_geometria(geometria_valida)
+
+        resultado.append((talhao_id, geometria_valida))
     return resultado
 
 

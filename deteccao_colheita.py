@@ -43,6 +43,65 @@ def serie_temporal_ndvi_medio(composicoes_por_ano):
     return serie
 
 
+def ndvi_no_ponto(composicao, ponto_wgs84):
+    """
+    Calcula o NDVI de um ÚNICO PIXEL — o mais próximo do ponto informado
+    (em WGS84, ex.: o centróide do talhão ou uma coordenada qualquer) —
+    em vez da média de toda a área. Útil para acompanhar o comportamento
+    temporal de um local específico dentro do talhão.
+
+    Retorna NaN se o ponto cair fora da extensão da composição, ou se
+    NIR+RED for zero naquele pixel.
+    """
+    import geopandas as gpd
+
+    ponto_reprojetado = (
+        gpd.GeoSeries([ponto_wgs84], crs="EPSG:4326").to_crs(composicao.rio.crs).iloc[0]
+    )
+
+    # Margem de tolerância de ~2 pixels: se o ponto estiver mais longe que
+    # isso do pixel mais próximo, está fora da área coberta pela imagem —
+    # melhor retornar NaN do que silenciosamente devolver o valor de um
+    # pixel de borda completamente sem relação com o ponto pedido.
+    dx = abs(float(composicao.x[1] - composicao.x[0])) if composicao.x.size > 1 else 0
+    dy = abs(float(composicao.y[0] - composicao.y[1])) if composicao.y.size > 1 else 0
+    tolerancia = max(dx, dy) * 2 or None
+
+    try:
+        pixel = composicao.sel(
+            x=ponto_reprojetado.x, y=ponto_reprojetado.y, method="nearest", tolerance=tolerancia
+        )
+    except (KeyError, IndexError):
+        return float("nan")
+
+    nir = float(pixel.sel(band="nir").values)
+    red = float(pixel.sel(band="red").values)
+
+    if not np.isfinite(nir) or not np.isfinite(red) or (nir + red) == 0:
+        return float("nan")
+
+    return (nir - red) / (nir + red)
+
+
+def serie_temporal_ndvi_ponto(composicoes_por_ano, ponto_wgs84):
+    """
+    Igual a `serie_temporal_ndvi_medio`, mas calculando o NDVI de um
+    único ponto (não a média da área) em cada ano.
+    """
+    valores = {}
+    for ano, composicao in composicoes_por_ano.items():
+        if composicao is None:
+            continue
+        ndvi = ndvi_no_ponto(composicao, ponto_wgs84)
+        if np.isfinite(ndvi):
+            valores[ano] = ndvi
+
+    serie = pd.Series(valores).sort_index()
+    serie.index.name = "ano"
+    serie.name = "ndvi_ponto"
+    return serie
+
+
 def sugerir_anos_candidatos(serie_ndvi, queda_minima=0.15, top_n=3):
     """
     Sugere até `top_n` anos como candidatos a colheita: aqueles em que o

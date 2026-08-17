@@ -392,7 +392,7 @@ if geometria is not None:
 st.header("2. Parâmetros")
 col1, col2, col3 = st.columns(3)
 with col1:
-    ano_inicio = st.number_input("Ano inicial", min_value=1984, max_value=2026, value=2015)
+    ano_inicio = st.number_input("Ano inicial", min_value=1984, max_value=2026, value=1987)
 with col2:
     ano_fim = st.number_input("Ano final", min_value=1984, max_value=2026, value=2026)
 with col3:
