@@ -222,10 +222,10 @@ def plotar_imagem_individual(
     nuvem_pct = composicao.attrs.get("nuvem_pct")
     tier = composicao.attrs.get("tier")
     ano = composicao.attrs.get("ano")
-    info_nuvem = f", {nuvem_pct:.0f}% nuvem" if nuvem_pct is not None else ""
+    #info_nuvem = f", {nuvem_pct:.0f}% nuvem" if nuvem_pct is not None else ""
     aviso_tier = " ⚠️T2" if tier == "T2" else ""
     aviso_candidato = " 🔴" if destaque_candidato else ""
-    ax.set_title(f"{ano} ({fonte}{info_nuvem}){aviso_tier}{aviso_candidato}", fontsize=8)
+    ax.set_title(f"{ano} ({fonte}){aviso_tier}{aviso_candidato}", fontsize=12)
     ax.set_xticks([])
     ax.set_yticks([])
 
